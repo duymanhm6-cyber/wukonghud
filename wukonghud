@@ -1,1 +1,223 @@
-loadstring(game:HttpGet("https://api.luarmor.net/files/v4/loaders/1e02e7d54c784c8b68c6f2f2f47d5d51.lua"))()
+--------------------------------------------------
+-- SERVICES
+--------------------------------------------------
+local StarterGui = game:GetService("StarterGui")
+
+--------------------------------------------------
+-- FILE CONFIG
+--------------------------------------------------
+local KEY_FILE = "keyWuKongHud.txt"
+
+--------------------------------------------------
+-- CHECK KEY FUNCTION (GIỮ LOGIC GỐC - LUARMOR)
+--------------------------------------------------
+local function checkAndLoadKey(userKey, onSuccess)
+    local api = loadstring(game:HttpGet(
+        "https://sdkapi-public.luarmor.net/library.lua"
+    ))()
+
+    api.script_id = "d423aa2069e4c1ddfd1315a51db5dcdb"
+
+    if #userKey ~= 32 then
+        StarterGui:SetCore("SendNotification", {
+            Title = "❌ Auth Error",
+            Text = "Key must be exactly 32 characters!",
+            Duration = 5
+        })
+        return false
+    end
+
+    local status = api.check_key(userKey)
+    print("Debug:", status.code, status.message)
+
+    if status.code == "KEY_VALID" then
+        script_key = userKey
+
+        if writefile then
+            writefile(KEY_FILE, userKey)
+        end
+
+        StarterGui:SetCore("SendNotification", {
+            Title = "✅ Success",
+            Text = "Key verified! Loading script...",
+            Duration = 5
+        })
+
+        if typeof(onSuccess) == "function" then
+            onSuccess()
+        end
+
+        api.load_script()
+        return true
+    else
+        if isfile and isfile(KEY_FILE) and delfile then
+            delfile(KEY_FILE)
+        end
+
+        StarterGui:SetCore("SendNotification", {
+            Title = "❌ Invalid Key",
+            Text = (status.message or "Unknown error") .. " (" .. status.code .. ")",
+            Duration = 8
+        })
+        return false
+    end
+end
+
+--------------------------------------------------
+-- AUTO LOAD SAVED KEY
+--------------------------------------------------
+if isfile and isfile(KEY_FILE) then
+    local savedKey = readfile(KEY_FILE)
+    if savedKey and #savedKey > 0 then
+        if checkAndLoadKey(savedKey) then
+            return
+        end
+    end
+end
+
+--------------------------------------------------
+-- GUI (ORIONLIB)
+--------------------------------------------------
+local OrionLib = loadstring(game:HttpGet(
+    "https://gist.githubusercontent.com/zxcv-5/026a962b48ed8aff1337b8436b91da32/raw",
+    true
+))()
+
+local Window = OrionLib:MakeWindow({
+    Name = "🔑 Wukong HUD | Key System",
+    HidePremium = false,
+    SaveConfig = false,
+    IntroEnabled = true,
+    IntroText = "Wukong HUD"
+})
+
+--------------------------------------------------
+-- HUD INFORMATION
+--------------------------------------------------
+local InfoTab = Window:MakeTab({
+    Name = "📌 HUD Information",
+    Icon = "rbxassetid://6034509993",
+    PremiumOnly = false
+})
+
+InfoTab:AddParagraph(
+    "🔥 Main Features",
+    "⚡ Ultra Fast Auto Raid\n" ..
+    "🌊 Auto Sea King (Sea 2 & Sea 3)\n" ..
+    "🎒 Auto Get Items\n" ..
+    "🧠 Smart Farming Logic\n\n" ..
+    "✅ Supports parallel execution:\n" ..
+    "• Auto Raid + Auto Sea King at the same time\n" ..
+    "• No conflict between features\n" ..
+    "• Optimized & stable performance"
+)
+
+--------------------------------------------------
+-- VERIFY KEY TAB
+--------------------------------------------------
+local VerifyTab = Window:MakeTab({
+    Name = "🔐 Verify Key",
+    Icon = "rbxassetid://6034509993",
+    PremiumOnly = false
+})
+
+VerifyTab:AddParagraph(
+    "ℹ️ Key Authentication",
+    "Enter your key below to unlock Wukong HUD"
+)
+
+local userKey = ""
+
+VerifyTab:AddTextbox({
+    Name = "🔑 Enter Key",
+    Default = "",
+    TextDisappear = false,
+    Callback = function(Value)
+        userKey = Value
+    end
+})
+
+VerifyTab:AddButton({
+    Name = "✅ Verify & Load",
+    Callback = function()
+        if userKey == "" then
+            OrionLib:MakeNotification({
+                Name = "❌ Error",
+                Content = "Please enter your key",
+                Time = 3
+            })
+            return
+        end
+
+        checkAndLoadKey(userKey, function()
+            OrionLib:Destroy()
+        end)
+    end
+})
+
+--------------------------------------------------
+-- GET KEY FREE
+--------------------------------------------------
+local FreeKeyTab = Window:MakeTab({
+    Name = "🆓 Get Free Key",
+    Icon = "rbxassetid://6034509993",
+    PremiumOnly = false
+})
+
+FreeKeyTab:AddParagraph(
+    "🎁 Free Key System",
+    "⏳ Free key duration: 6 hours\n" ..
+    "🔁 Can be re-obtained multiple times\n" ..
+    "⏱️ Maximum usage: up to 48 hours"
+)
+
+FreeKeyTab:AddButton({
+    Name = "🌐 Copy Get Key Link",
+    Callback = function()
+        if setclipboard then
+            setclipboard("https://ads.luarmor.net/get_key?for=Wukong_HUD-KffnwRmvXtCz")
+            OrionLib:MakeNotification({
+                Name = "📋 Copied",
+                Content = "Get-key link copied to clipboard",
+                Time = 3
+            })
+        end
+    end
+})
+
+--------------------------------------------------
+-- BUY KEY
+--------------------------------------------------
+local BuyKeyTab = Window:MakeTab({
+    Name = "💎 Buy Premium Key",
+    Icon = "rbxassetid://6034509993",
+    PremiumOnly = false
+})
+
+BuyKeyTab:AddParagraph(
+    "💰 Premium Access",
+    "✔ Stable & long-term usage\n" ..
+    "✔ No ads / No waiting\n" ..
+    "✔ Priority support"
+)
+
+BuyKeyTab:AddButton({
+    Name = "📘 Facebook Contact",
+    Callback = function()
+        if setclipboard then
+            setclipboard("https://www.facebook.com/DuyManhbking")
+        end
+    end
+})
+
+BuyKeyTab:AddButton({
+    Name = "💬 Join Discord",
+    Callback = function()
+        if setclipboard then
+            setclipboard("https://discord.gg/ZsUnSGRJ")
+        end
+    end
+})
+
+--------------------------------------------------
+OrionLib:Init()
