@@ -1,2 +1,85 @@
 repeat wait() until game:IsLoaded() and game.Players.LocalPlayer 
-loadstring(game:HttpGet("https://api.luarmor.net/files/v4/loaders/31877dbc6f253dca6e89ba3ac3291072.lua"))()
+-- Replace the contents of GitHub wukonghud with this public entry.
+-- Acquire the same startup lock as the HUD BEFORE running the FREE key menu.
+local environment = getgenv()
+local deadline = os.clock() + 60
+while not game:IsLoaded() or not game:GetService("Players").LocalPlayer or tostring(game.JobId or "") == "" do
+    if os.clock() >= deadline then warn("[Wukong Entry] GAME_NOT_READY"); return end
+    task.wait(0.25)
+end
+local jobId = tostring(game.JobId)
+local runtime = environment.WK_Runtime
+if environment.WK_Loaded == true and environment.WK_HudReady == true and environment.WK_Ready == true
+    and environment.WK_RunOwner ~= nil and tostring(environment.WK_ReadyJobId or "") == jobId
+    and type(runtime) == "table" and runtime.active ~= false and runtime.owner == environment.WK_RunOwner then return end
+local previous = environment.WK_StartupFlight
+if type(previous) == "table" and previous.jobId == jobId and previous.active == true
+    and previous.phase == "menu" and type(previous.reopenMenu) == "function" then
+    local reopened, visible = pcall(previous.reopenMenu)
+    if reopened and visible then return end
+end
+if type(previous) == "table" and previous.jobId == jobId and previous.active == true then
+    warn("[Wukong Entry] Startup is still in progress. Skipping duplicate.")
+    return
+end
+for _, name in ipairs({"WK_TeleportAutoExecState", "WK_LoaderWatchdog"}) do
+    local state = environment[name]
+    if type(state) == "table" and state.jobId == jobId and (state.active == true or state.blocked == true) then
+        warn("[Wukong Entry] Another Wukong loader is running. Skipping duplicate.")
+        return
+    end
+end
+local function normalize(value)
+    return type(value) == "string" and (value:gsub("^\239\187\191", ""):match("^%s*(.-)%s*$") or "") or ""
+end
+local inputKey = normalize(environment.script_key)
+if inputKey == "" then inputKey = normalize(script_key) end
+if inputKey == "" then inputKey = normalize(_G and _G.script_key) end
+local flight = {jobId=jobId, source="github", active=true, phase="menu-download",
+    menuExpected=true, inputKey=inputKey, startedAt=os.clock()}
+environment.WK_StartupFlight = flight
+local ok = pcall(function()
+    local source = game:HttpGet("https://api.luarmor.net/files/v4/loaders/31877dbc6f253dca6e89ba3ac3291072.lua", true)
+    local loader = loadstring(source)
+    assert(type(loader) == "function", "MENU_COMPILE_FAILED")
+    -- This FREE menu must not authenticate with a product key left by another
+    -- entry. The key is kept in the handoff (and on disk), not deleted.
+    local seen = {}
+    local function clear(scope)
+        if type(scope) ~= "table" or seen[scope] then return end
+        seen[scope] = true
+        scope.script_key = nil
+        assert(scope.script_key == nil, "MENU_KEY_ENV_FAILED")
+    end
+    script_key = nil
+    clear(environment)
+    clear(_G)
+    assert(type(getfenv) == "function", "MENU_KEY_ENV_UNAVAILABLE")
+    local scope = getfenv(loader)
+    assert(type(scope) == "table", "MENU_KEY_ENV_UNAVAILABLE")
+    clear(scope)
+    clear(scope._G)
+    if type(scope.getgenv) == "function" then clear(scope.getgenv()) end
+    flight.phase, flight.protectedStarted = "menu-loading", true
+    loader()
+end)
+if environment.WK_StartupFlight ~= flight then return end
+if not ok and flight.protectedStarted ~= true then
+    -- Download/compile failed before executing any protected code: safe to retry.
+    flight.active, flight.phase = false, "failed"
+    if inputKey ~= "" then
+        script_key, environment.script_key = inputKey, inputKey
+        if type(_G) == "table" then _G.script_key = inputKey end
+    end
+    warn("[Wukong Entry] MENU_DOWNLOAD_OR_COMPILE_FAILED: retry the entry.")
+elseif flight.menuExpected == true then
+    -- A legacy menu has not adopted the lock. Keep it locked rather than
+    -- allowing a second protected loader to start over a possibly live one.
+    flight.phase = ok and "menu-version-mismatch" or "blocked"
+    warn(ok and "[Wukong Entry] Update the Luarmor key menu to the matching version."
+        or "[Wukong Entry] Menu startup failed. Please rejoin before retrying.")
+elseif not ok and flight.phase ~= "loading" and flight.phase ~= "ready" then
+    flight.active, flight.phase = false, "failed"
+    warn("[Wukong Entry] Menu startup failed before product loading.")
+end
+
