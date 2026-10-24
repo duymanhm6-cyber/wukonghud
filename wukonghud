@@ -2,6 +2,98 @@ repeat wait() until game:IsLoaded() and game.Players.LocalPlayer
 -- Replace the contents of GitHub wukonghud with this public entry.
 -- Acquire the same startup lock as the HUD BEFORE running the FREE key menu.
 local environment = getgenv()
+local function findEntryRequest()
+    local compatibility = environment.WK_LuarmorRequestCompatibility
+    local scopes = {environment}
+    if type(getfenv) == "function" then
+        local ok, scope = pcall(getfenv, findEntryRequest)
+        if ok and type(scope) == "table" then scopes[#scopes + 1] = scope end
+    end
+    for _, scope in ipairs(scopes) do
+        local candidates = {scope.request, scope.http_request}
+        for _, name in ipairs({"syn", "http", "fluxus", "krnl"}) do
+            if type(scope[name]) == "table" then candidates[#candidates + 1] = scope[name].request end
+        end
+        for _, candidate in pairs(candidates) do
+            if type(compatibility) == "table" and candidate == compatibility.wrapped
+                and type(compatibility.original) == "function" then return compatibility.original end
+            if type(candidate) == "function" then return candidate end
+        end
+    end
+end
+local function entryNetworkCall(callback)
+    local owner = environment.WK_StartupFlight
+    local done, results = false, nil
+    local worker = task.defer(function()
+        results = table.pack(pcall(callback))
+        done = true
+    end)
+    local deadline = os.clock() + 15
+    while not done and os.clock() < deadline and environment.WK_StartupFlight == owner do task.wait(0.05) end
+    if not done then
+        if type(task.cancel) == "function" then pcall(task.cancel, worker) end
+        return false, "MENU_REQUEST_TIMEOUT"
+    end
+    if environment.WK_StartupFlight ~= owner then return false, "MENU_SUPERSEDED" end
+    return table.unpack(results, 1, results.n)
+end
+local function fetchEntryChunk(url)
+    if type(loadstring) ~= "function" then error("MENU_LOADSTRING_UNAVAILABLE", 0) end
+    local owner = environment.WK_StartupFlight
+    local lastError = "MENU_DOWNLOAD_FAILED"
+    local function compile(source)
+        if type(source) ~= "string" or not source:find("%S") then
+            lastError = "MENU_RESPONSE_EMPTY"
+            return nil
+        end
+        source = source:gsub("^\239\187\191", "")
+        if source:match("^%s*<") then lastError = "MENU_RESPONSE_HTML"; return nil end
+        local ok, chunk = pcall(loadstring, source)
+        if not ok or type(chunk) ~= "function" then lastError = "MENU_COMPILE_FAILED"; return nil end
+        return chunk
+    end
+    local requestFunction = findEntryRequest()
+    for attempt = 1, 3 do
+        if environment.WK_StartupFlight ~= owner then error("MENU_SUPERSEDED", 0) end
+        local ok, source = entryNetworkCall(function() return game:HttpGet(url, true) end)
+        if environment.WK_StartupFlight ~= owner then error("MENU_SUPERSEDED", 0) end
+        if ok then
+            local chunk = compile(source)
+            if chunk then return chunk end
+        else
+            lastError = source == "MENU_REQUEST_TIMEOUT" and source or "MENU_DOWNLOAD_FAILED"
+        end
+        if requestFunction then
+            local requestOk, response = entryNetworkCall(function()
+                return requestFunction({
+                    Url=url, Method="GET", Timeout=15,
+                    Headers={["Cache-Control"]="no-cache", ["User-Agent"]="Roblox/WinInet"}
+                })
+            end)
+            if environment.WK_StartupFlight ~= owner then error("MENU_SUPERSEDED", 0) end
+            if requestOk then
+                local status
+                local body = response
+                if type(response) == "table" then
+                    status = tonumber(response.StatusCode or response.Status or response.status_code or response.status)
+                    body = response.Body or response.body or response.ResponseBody
+                    if response.Success == false then body = nil end
+                end
+                if status and (status < 200 or status >= 300) then
+                    lastError = "MENU_HTTP_" .. tostring(status)
+                    if status >= 400 and status < 500 then error(lastError, 0) end
+                else
+                    local chunk = compile(body)
+                    if chunk then return chunk end
+                end
+            else
+                lastError = response == "MENU_REQUEST_TIMEOUT" and response or "MENU_DOWNLOAD_FAILED"
+            end
+        end
+        if attempt < 3 then task.wait(attempt) end
+    end
+    error(lastError, 0)
+end
 local deadline = os.clock() + 60
 while not game:IsLoaded() or not game:GetService("Players").LocalPlayer or tostring(game.JobId or "") == "" do
     if os.clock() >= deadline then warn("[Wukong Entry] GAME_NOT_READY"); return end
@@ -38,10 +130,11 @@ if inputKey == "" then inputKey = normalize(_G and _G.script_key) end
 local flight = {jobId=jobId, source="github", active=true, phase="menu-download",
     menuExpected=true, inputKey=inputKey, startedAt=os.clock()}
 environment.WK_StartupFlight = flight
-local ok = pcall(function()
-    local source = game:HttpGet("https://api.luarmor.net/files/v4/loaders/31877dbc6f253dca6e89ba3ac3291072.lua", true)
-    local loader = loadstring(source)
-    assert(type(loader) == "function", "MENU_COMPILE_FAILED")
+local ok, failure = pcall(function()
+    local loader = fetchEntryChunk("https://api.luarmor.net/files/v4/loaders/31877dbc6f253dca6e89ba3ac3291072.lua")
+    if environment.WK_StartupFlight ~= flight or tostring(game.JobId or "") ~= jobId then
+        error("MENU_SUPERSEDED", 0)
+    end
     -- This FREE menu must not authenticate with a product key left by another
     -- entry. The key is kept in the handoff (and on disk), not deleted.
     local seen = {}
@@ -71,7 +164,10 @@ if not ok and flight.protectedStarted ~= true then
         script_key, environment.script_key = inputKey, inputKey
         if type(_G) == "table" then _G.script_key = inputKey end
     end
-    warn("[Wukong Entry] MENU_DOWNLOAD_OR_COMPILE_FAILED: retry the entry.")
+    local code = type(failure) == "string" and failure:match("^MENU_[A-Z0-9_]+$")
+        and failure or "MENU_DOWNLOAD_OR_COMPILE_FAILED"
+    flight.lastError = code
+    warn("[Wukong Entry] " .. code .. ": retry the entry.")
 elseif flight.menuExpected == true then
     -- A legacy menu has not adopted the lock. Keep it locked rather than
     -- allowing a second protected loader to start over a possibly live one.
@@ -82,4 +178,3 @@ elseif not ok and flight.phase ~= "loading" and flight.phase ~= "ready" then
     flight.active, flight.phase = false, "failed"
     warn("[Wukong Entry] Menu startup failed before product loading.")
 end
-
