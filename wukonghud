@@ -103,6 +103,25 @@ local runtime = environment.WK_Runtime
 if environment.WK_Loaded == true and environment.WK_HudReady == true and environment.WK_Ready == true
     and environment.WK_RunOwner ~= nil and tostring(environment.WK_ReadyJobId or "") == jobId
     and type(runtime) == "table" and runtime.active ~= false and runtime.owner == environment.WK_RunOwner then return end
+local function pingLoadingOverlay(reason)
+    -- A repeated run: point the user at the running one, or say why it stopped.
+    local text = "Already loading - please wait."
+    if reason == "started" then
+        text = "Already running in this server."
+    elseif reason == "blocked" or reason == "menu-version-mismatch" then
+        text = "Startup is blocked - rejoin to retry."
+    else
+        local overlay = environment.WK_LoadingOverlay
+        if type(overlay) == "table" and type(overlay.ping) == "function" then
+            local pinged, shown = pcall(overlay.ping)
+            if pinged and shown then return end
+        end
+    end
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification",
+            {Title = "Wukong HUD", Text = text, Duration = 4})
+    end)
+end
 local previous = environment.WK_StartupFlight
 if type(previous) == "table" and previous.jobId == jobId and previous.active == true
     and previous.phase == "menu" and type(previous.reopenMenu) == "function" then
@@ -111,12 +130,14 @@ if type(previous) == "table" and previous.jobId == jobId and previous.active == 
 end
 if type(previous) == "table" and previous.jobId == jobId and previous.active == true then
     warn("[Wukong Entry] Startup is still in progress. Skipping duplicate.")
+    pingLoadingOverlay(previous.phase)
     return
 end
 for _, name in ipairs({"WK_TeleportAutoExecState", "WK_LoaderWatchdog"}) do
     local state = environment[name]
     if type(state) == "table" and state.jobId == jobId and (state.active == true or state.blocked == true) then
         warn("[Wukong Entry] Another Wukong loader is running. Skipping duplicate.")
+        pingLoadingOverlay(state.blocked == true and "blocked" or "loading")
         return
     end
 end
@@ -129,8 +150,181 @@ if inputKey == "" then inputKey = normalize(_G and _G.script_key) end
 local flight = {jobId=jobId, source="github", active=true, phase="menu-download",
     menuExpected=true, inputKey=inputKey, startedAt=os.clock()}
 environment.WK_StartupFlight = flight
+-- Progress panel until the key menu takes it over (the menu releases it).
+-- Downloading and unpacking the protected menu shows nothing for seconds, so
+-- users think it failed and run it again. Display only; every UI call is guarded.
+local entryOverlay = {}
+do
+    local FREEZE = "The game may freeze for a few seconds. This is normal - do not run it again."
+    local handle, alive, ui = {owner = "entry", percent = 0}, true, nil
+    local dismissed, opening, failure, notice = false, false, nil, nil
+    local lastPhase, phaseAt = nil, os.clock()
+    local function rgb(r, g, b) return Color3.fromRGB(r, g, b) end
+    local function make(className, props, parent)
+        local object = Instance.new(className)
+        for key, value in pairs(props) do object[key] = value end
+        object.Parent = parent
+        return object
+    end
+    local function mount(gui)
+        -- gethui/CoreGui stay visible through game scripts that hide PlayerGui.
+        local parents = {}
+        if type(gethui) == "function" then
+            local found, hidden = pcall(gethui)
+            if found and hidden then parents[#parents + 1] = hidden end
+        end
+        local found, coreGui = pcall(game.GetService, game, "CoreGui")
+        if found and coreGui then parents[#parents + 1] = coreGui end
+        local player = game:GetService("Players").LocalPlayer
+        local playerGui = player and player:FindFirstChildOfClass("PlayerGui")
+        if playerGui then parents[#parents + 1] = playerGui end
+        for _, parent in ipairs(parents) do
+            pcall(function()
+                local old = parent:FindFirstChild("WukongLoadingOverlay")
+                if old then old:Destroy() end
+            end)
+        end
+        for _, parent in ipairs(parents) do
+            if pcall(function() gui.Parent = parent end) and gui.Parent ~= nil then return true end
+        end
+        return false
+    end
+    local function build()
+        local gui = make("ScreenGui", {Name = "WukongLoadingOverlay", ResetOnSpawn = false,
+            IgnoreGuiInset = true, DisplayOrder = 1000000})
+        local frame = make("Frame", {Name = "Panel", AnchorPoint = Vector2.new(0.5, 0),
+            Position = UDim2.new(0.5, 0, 0, 64), Size = UDim2.new(0.92, 0, 0, 92),
+            BackgroundColor3 = rgb(25, 25, 25), BorderSizePixel = 0}, gui)
+        make("UISizeConstraint", {MaxSize = Vector2.new(360, 92)}, frame)
+        make("UICorner", {CornerRadius = UDim.new(0, 8)}, frame)
+        make("UIStroke", {Color = rgb(60, 60, 60), Thickness = 1}, frame)
+        local function label(props)
+            props.BackgroundTransparency, props.Text = 1, props.Text or ""
+            props.Font = props.Font or Enum.Font.Gotham
+            props.TextColor3 = props.TextColor3 or rgb(240, 240, 240)
+            props.TextXAlignment = props.TextXAlignment or Enum.TextXAlignment.Left
+            return make("TextLabel", props, frame)
+        end
+        local parts = {gui = gui, frame = frame}
+        label({Name = "Title", Text = "Wukong HUD", Font = Enum.Font.GothamBold, TextSize = 14,
+            Position = UDim2.new(0, 12, 0, 8), Size = UDim2.new(1, -110, 0, 18)})
+        parts.elapsed = label({Name = "Elapsed", TextSize = 12, TextColor3 = rgb(150, 150, 150),
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Position = UDim2.new(1, -100, 0, 8), Size = UDim2.new(0, 64, 0, 18)})
+        parts.step = label({Name = "Step", TextSize = 13, TextTruncate = Enum.TextTruncate.AtEnd,
+            Position = UDim2.new(0, 12, 0, 30), Size = UDim2.new(1, -72, 0, 16)})
+        parts.percent = label({Name = "Percent", Font = Enum.Font.GothamBold, TextSize = 13,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Position = UDim2.new(1, -60, 0, 30), Size = UDim2.new(0, 48, 0, 16)})
+        parts.detail = label({Name = "Detail", TextSize = 11, TextColor3 = rgb(150, 150, 150),
+            TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top,
+            Position = UDim2.new(0, 12, 0, 50), Size = UDim2.new(1, -24, 0, 26)})
+        local track = make("Frame", {Name = "Track", BackgroundColor3 = rgb(50, 50, 50),
+            BorderSizePixel = 0, Position = UDim2.new(0, 12, 1, -13), Size = UDim2.new(1, -24, 0, 5)}, frame)
+        make("UICorner", {CornerRadius = UDim.new(1, 0)}, track)
+        parts.fill = make("Frame", {Name = "Fill", BackgroundColor3 = rgb(70, 150, 255),
+            BorderSizePixel = 0, Size = UDim2.new(0, 0, 1, 0)}, track)
+        make("UICorner", {CornerRadius = UDim.new(1, 0)}, parts.fill)
+        local hide = make("TextButton", {Name = "Hide", Text = "×", Font = Enum.Font.GothamBold,
+            TextSize = 16, TextColor3 = rgb(150, 150, 150), BackgroundTransparency = 1, AutoButtonColor = false,
+            Position = UDim2.new(1, -32, 0, 5), Size = UDim2.new(0, 24, 0, 24)}, frame)
+        hide.Activated:Connect(function()
+            dismissed = true
+            frame.Visible = false
+        end)
+        gui:GetPropertyChangedSignal("Enabled"):Connect(function()
+            if alive and not gui.Enabled then gui.Enabled = true end
+        end)
+        if not mount(gui) then
+            gui:Destroy()
+            return nil
+        end
+        gui.Enabled = true
+        return parts
+    end
+    local function release()
+        alive = false
+        if environment.WK_LoadingOverlay == handle then environment.WK_LoadingOverlay = nil end
+        local gui = ui and ui.gui
+        ui = nil
+        if gui then pcall(function() gui:Destroy() end) end
+    end
+    local function tick()
+        if environment.WK_LoadingOverlay ~= handle or not ui then return false end
+        local now = os.clock()
+        local step, detail, percent, color = nil, nil, handle.percent, rgb(70, 150, 255)
+        if failure then
+            if now >= failure.untilAt then return false end
+            step, detail, color = failure.step, failure.detail, rgb(230, 80, 80)
+        else
+            if environment.WK_StartupFlight ~= flight then return false end
+            local phase, low, high = flight.phase, nil, nil
+            if phase ~= lastPhase then lastPhase, phaseAt = phase, now end
+            -- Each step gets its own 120s: three slow download tries alone can take ~90s.
+            if now - phaseAt > 120 then return false end
+            if phase == "menu-loading" or (phase == "menu-download" and opening) then
+                step, detail, low, high = "Opening key menu...", FREEZE, 0.04, 0.06
+            elseif phase == "menu-download" then
+                step, detail, low, high = "Downloading key menu...",
+                    "Please wait - the first load can take a while.", 0.01, 0.04
+            else
+                return false
+            end
+            percent = math.max(percent, low + (high - low) * (1 - math.exp(-(now - phaseAt) / 4)))
+        end
+        handle.percent = percent
+        ui.step.Text = step
+        ui.detail.Text = not failure and notice and now < notice
+            and "Already loading - please wait for this one." or detail
+        ui.percent.Text = string.format("%d%%", math.floor(percent * 100 + 0.5))
+        ui.fill.Size = UDim2.new(percent, 0, 1, 0)
+        ui.fill.BackgroundColor3 = color
+        ui.elapsed.Text = string.format("%.1fs", now - flight.startedAt)
+        ui.frame.Visible = not dismissed
+        return true
+    end
+    function entryOverlay.opening()
+        -- Draw the freeze notice for one frame before the protected menu
+        -- starts decrypting; a frozen client cannot redraw the panel.
+        opening = true
+        if not alive or not ui then return end
+        local ticked, shown = pcall(tick)
+        if ticked and shown and not dismissed then task.wait() end
+    end
+    function entryOverlay.fail(step, detail)
+        if not alive or environment.WK_LoadingOverlay ~= handle then return end
+        failure, dismissed = {step = step, detail = detail, untilAt = os.clock() + 6}, false
+        pcall(tick)
+    end
+    handle.release = release
+    handle.hidden = function() return dismissed end
+    handle.ping = function()
+        -- A red failure panel cannot show the reminder; let the caller notify.
+        if not alive or not ui or failure then return false end
+        notice, dismissed = os.clock() + 4, false
+        return true
+    end
+    local older = environment.WK_LoadingOverlay
+    environment.WK_LoadingOverlay = handle
+    if type(older) == "table" and type(older.release) == "function" then pcall(older.release) end
+    local built, parts = pcall(build)
+    if built and parts then
+        ui = parts
+        task.spawn(function()
+            while alive do
+                local ticked, keep = pcall(tick)
+                if not ticked or not keep then break end
+                task.wait(0.15)
+            end
+            release()
+        end)
+    else
+        release()
+    end
+end
 local ok, failure = pcall(function()
     local loader = fetchEntryChunk("https://api.luarmor.net/files/v4/loaders/31877dbc6f253dca6e89ba3ac3291072.lua")
+    pcall(entryOverlay.opening)
     if environment.WK_StartupFlight ~= flight or tostring(game.JobId or "") ~= jobId then
         error("MENU_SUPERSEDED", 0)
     end
@@ -167,13 +361,17 @@ if not ok and flight.protectedStarted ~= true then
         and failure or "MENU_DOWNLOAD_OR_COMPILE_FAILED"
     flight.lastError = code
     warn("[Wukong Entry] " .. code .. ": retry the entry.")
+    pcall(entryOverlay.fail, "Load stopped", code .. " - run the script again to retry.")
 elseif flight.menuExpected == true then
     -- A legacy menu has not adopted the lock. Keep it locked rather than
     -- allowing a second protected loader to start over a possibly live one.
     flight.phase = ok and "menu-version-mismatch" or "blocked"
     warn(ok and "[Wukong Entry] Update the Luarmor key menu to the matching version."
         or "[Wukong Entry] Menu startup failed. Please rejoin before retrying.")
+    pcall(entryOverlay.fail, ok and "Key menu out of date" or "Load stopped",
+        ok and "Update the key menu, then rejoin." or "Please rejoin before retrying.")
 elseif not ok and flight.phase ~= "loading" and flight.phase ~= "ready" then
     flight.active, flight.phase = false, "failed"
     warn("[Wukong Entry] Menu startup failed before product loading.")
+    pcall(entryOverlay.fail, "Load stopped", "Run the script again to retry.")
 end
